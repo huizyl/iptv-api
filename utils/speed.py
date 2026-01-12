@@ -22,6 +22,8 @@ cache: TestResultCacheData = {}
 speed_test_timeout = config.speed_test_timeout
 speed_test_filter_host = config.speed_test_filter_host
 open_filter_resolution = config.open_filter_resolution
+open_filter_audio_only = config.open_filter_audio_only
+filter_audio_only_strict = config.filter_audio_only_strict
 min_resolution_value = config.min_resolution_value
 max_resolution_value = config.max_resolution_value
 open_supply = config.open_supply
@@ -276,8 +278,11 @@ async def get_result(url: str, headers: dict = None, resolution: str = None,
     except:
         pass
     finally:
-        if not info['resolution'] and filter_resolution and not location and info['delay'] != -1:
+        if not resolution and filter_resolution and not location and info['delay'] != -1:
             info['resolution'] = await get_resolution_ffprobe(url, headers, timeout)
+            # 过滤 audio-only
+            if open_filter_audio_only and info.get("resolution") == "0x0":
+                info["delay"] = -1
         return info
 
 
@@ -365,30 +370,52 @@ async def get_resolution_ffprobe(url: str, headers: dict = None, timeout: int = 
     """
     Get the resolution of the url by ffprobe
     """
-    resolution = None
+    resolution: str | None = None
     proc = None
     try:
+        header_str = ''.join(f'{k}: {v}\r\n' for k, v in headers.items()) if headers else ''
         probe_args = [
-            'ffprobe',
-            '-v', 'error',
-            '-headers', ''.join(f'{k}: {v}\r\n' for k, v in headers.items()) if headers else '',
-            '-select_streams', 'v:0',
-            '-show_entries', 'stream=width,height',
-            "-of", 'json',
-            url
+            "ffprobe", "-v", "error",
+            "-headers", header_str,
+            "-show_entries", "stream=codec_type,width,height",
+            "-of", "json",
+            url,
         ]
-        proc = await asyncio.create_subprocess_exec(*probe_args, stdout=asyncio.subprocess.PIPE,
-                                                    stderr=asyncio.subprocess.PIPE)
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
-        video_stream = json.loads(out.decode('utf-8'))["streams"][0]
-        resolution = f"{video_stream['width']}x{video_stream['height']}"
-    except:
-        if proc:
-            proc.kill()
+        proc = await asyncio.create_subprocess_exec(
+            *probe_args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout)
+        data = json.loads((out or b"{}").decode("utf-8", errors="ignore"))
+        streams = data.get("streams", []) or []
+
+        has_video = any(s.get("codec_type") == "video" for s in streams)
+        if has_video:
+            v = next((s for s in streams if s.get("codec_type") == "video"), None)
+            if v and v.get("width") and v.get("height"):
+                resolution = f"{v['width']}x{v['height']}"
+            else:
+                # 有视频流但未拿到宽高，保持 None（避免误杀）
+                resolution = None
+        else:
+            has_audio = any(s.get("codec_type") == "audio" for s in streams)
+            if has_audio:
+                # 明确 audio-only：返回 0x0 作为“无视频流”哨兵值
+                resolution = "0x0"
+            else:
+                resolution = None
+    except Exception:
+        if filter_audio_only_strict:
+            # 严格模式：探测失败也当无效
+            resolution = "0x0"
     finally:
         if proc:
-            await proc.wait()
-        return resolution
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+    return resolution
 
 
 def get_video_info(video_info):

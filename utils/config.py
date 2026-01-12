@@ -72,6 +72,18 @@ class ConfigManager:
         return self.config.getboolean(
             "Settings", "open_filter_resolution", fallback=True
         )
+        
+    @property
+    def open_filter_audio_only(self):
+        return self.config.getboolean(
+            "Settings", "open_filter_audio_only", fallback=True
+        )
+
+    @property
+    def filter_audio_only_strict(self):
+        return self.config.getboolean(
+            "Settings", "filter_audio_only_strict", fallback=False
+        )
 
     @property
     def ipv_type(self):
